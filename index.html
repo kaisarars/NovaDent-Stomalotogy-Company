@@ -110,6 +110,11 @@ textarea{resize:vertical;min-height:110px}
 .success.show{display:block}
 .success h3{margin-bottom:6px}
 .consent{font-size:12px;color:#8fa6a9;font-weight:400}
+.form-status{display:none;border-radius:12px;padding:12px 14px;font-size:14px;line-height:1.5;background:#fdf0ee;color:#7d2a21;border:1px solid #f3cfc9}
+.form-status.show{display:block}
+.form-status a{color:inherit;font-weight:700}
+.btn[disabled]{opacity:.7;cursor:wait}
+.hp-field{position:absolute!important;left:-9999px;width:1px;height:1px;overflow:hidden}
 
 /* Doctors */
 .doctors-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:44px}
@@ -484,11 +489,13 @@ footer .logo{color:#fff}
             </label>
           </div>
           <label>Комментарий<textarea name="comment" placeholder="Что беспокоит? (необязательно)"></textarea></label>
+          <label class="hp-field" aria-hidden="true">Не заполняйте это поле<input name="website" tabindex="-1" autocomplete="off"></label>
+          <div class="form-status" id="bookingStatus" role="alert"></div>
           <button class="btn btn-primary" type="submit">Отправить заявку</button>
           <span class="consent">Нажимая кнопку, вы соглашаетесь на обработку персональных данных.</span>
         </form>
         <div class="success" id="bookingSuccess">
-          <h3>Заявка принята! 🎉</h3>
+          <h3>Заявка отправлена! 🎉</h3>
           <p id="bookingSummary"></p>
           <button class="btn btn-ghost" style="margin-top:16px" id="bookingAgain">Новая запись</button>
         </div>
@@ -642,19 +649,41 @@ phone.addEventListener('input',()=>{
 const bf=document.getElementById('bookingForm'),dateIn=bf.date;
 const today=new Date();today.setMinutes(today.getMinutes()-today.getTimezoneOffset());
 dateIn.min=today.toISOString().slice(0,10);
-bf.addEventListener('submit',e=>{
-  e.preventDefault();let ok=true;
+/* ===== Отправка заявки в n8n (workflow «NovaDent»: Google Sheets → Gemini → Telegram) ===== */
+const BOOKING_WEBHOOK_URL = "https://kaisarars.app.n8n.cloud/webhook/novadent-booking";
+const bookingBtn=bf.querySelector('button[type=submit]'),bookingStatus=document.getElementById('bookingStatus');
+let bookingSending=false;
+function showBookingError(){
+  const tel=document.querySelector('a[href^="tel:"]');
+  bookingStatus.textContent='Не удалось отправить заявку. Проверьте интернет и попробуйте ещё раз'+(tel?' или позвоните нам: '+tel.textContent.trim():'')+'.';
+  bookingStatus.classList.add('show');
+}
+async function sendBooking(data){
+  const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);
+  try{
+    const res=await fetch(BOOKING_WEBHOOK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:ctrl.signal});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+  }finally{clearTimeout(timer)}
+}
+bf.addEventListener('submit',async e=>{
+  e.preventDefault();if(bookingSending)return;let ok=true;
   const chk=(el,cond,msg)=>{setErr(el,cond?'':msg);if(!cond)ok=false};
   chk(bf.name,bf.name.value.trim().length>=2,'Введите имя');
   chk(bf.phone,bf.phone.value.replace(/\D/g,'').length===11,'Введите номер полностью');
   chk(bf.service,bf.service.value,'Выберите услугу');
   chk(bf.date,bf.date.value&&bf.date.value>=dateIn.min,'Выберите дату');
   if(!ok)return;
-  const d=new Date(bf.date.value).toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
-  document.getElementById('bookingSummary').textContent=`${bf.name.value.trim()}, вы записаны на «${bf.service.value}» — ${d}, ${bf.time.value.toLowerCase()}. Мы перезвоним на ${bf.phone.value} для подтверждения.`;
+  if(bf.website.value){bf.style.display='none';document.getElementById('bookingSuccess').classList.add('show');return} // бот-спам: не отправляем
+  const data={name:bf.name.value.trim(),phone:bf.phone.value,service:bf.service.value,doctor:bf.doctor.value,date:bf.date.value,time:bf.time.value,comment:bf.comment.value.trim()};
+  bookingSending=true;bookingBtn.disabled=true;const btnText=bookingBtn.textContent;bookingBtn.textContent='Отправляем…';bookingStatus.classList.remove('show');
+  try{await sendBooking(data)}
+  catch(err){console.warn('[NovaDent] Заявка не отправлена:',err.message);showBookingError();return}
+  finally{bookingSending=false;bookingBtn.disabled=false;bookingBtn.textContent=btnText}
+  const d=new Date(data.date).toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
+  document.getElementById('bookingSummary').textContent=`${bf.name.value.trim()}, заявка на «${data.service}» — ${d}, ${data.time.toLowerCase()} — отправлена. Администратор перезвонит на ${data.phone}, чтобы подтвердить время.`;
   bf.style.display='none';document.getElementById('bookingSuccess').classList.add('show');
 });
-document.getElementById('bookingAgain').onclick=()=>{bf.reset();bf.style.display='';document.getElementById('bookingSuccess').classList.remove('show')};
+document.getElementById('bookingAgain').onclick=()=>{bf.reset();bookingStatus.classList.remove('show');bf.style.display='';document.getElementById('bookingSuccess').classList.remove('show')};
 bf.querySelectorAll('input,select').forEach(el=>el.addEventListener('input',()=>setErr(el,'')));
 
 // Reviews
